@@ -23,6 +23,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 try:
@@ -43,6 +44,7 @@ except ImportError as exc:  # pragma: no cover - only runs when dependency is mi
 # The MCP tools need to know which repository is currently being analyzed.
 # The value is set in main() after command-line parsing and validation.
 ACTIVE_REPO_ROOT: Path | None = None
+PROCESS_LOGS_ENABLED = True
 
 
 IGNORED_DIRS = {
@@ -93,6 +95,45 @@ DEPENDENCY_FILE_CANDIDATES = [
 ]
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class ProxyCompatibilityError(RuntimeError):
+    """Raised when the configured proxy URL cannot work with Claude Agent SDK."""
+
+
+class AgentRunError(RuntimeError):
+    """Raised when Claude Agent SDK starts but the runtime returns an error."""
+
+
+def log_step(message: str) -> None:
+    """Print a short process log line so the terminal shows current progress."""
+
+    if PROCESS_LOGS_ENABLED:
+        print(f"[repo-health] {message}", flush=True)
+
+
+def safe_report_filename(repo: Path) -> str:
+    """Build a safe Markdown filename from the analyzed repository name."""
+
+    safe_name = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in repo.name.strip()
+    ).strip("_")
+    if not safe_name:
+        safe_name = "repository"
+    return f"{safe_name}_anthropic_agentsdk_repository_health_report.md"
+
+
+def save_report(report: str, repo: Path) -> Path:
+    """Save the final report in the root folder of this project."""
+
+    output_path = PROJECT_ROOT / safe_report_filename(repo)
+    output_path.write_text(f"# Repository Health Report\n\n{report}\n", encoding="utf-8")
+    log_step(f"Saved report to {output_path}")
+    return output_path
+
+
 def load_first_value(path: Path, *, required: bool = True) -> str | None:
     """Read the first non-comment line from a small config/secret text file."""
 
@@ -112,6 +153,54 @@ def load_first_value(path: Path, *, required: bool = True) -> str | None:
     if required:
         raise ValueError(f"File {path} did not contain a usable value.")
     return None
+
+
+def normalize_anthropic_base_url(url: str) -> str:
+    """Return the base URL shape expected by Claude Agent SDK.
+
+    Claude Agent SDK uses Anthropic's Messages API, so the Claude Code process
+    appends /v1/messages to ANTHROPIC_BASE_URL. If a user pasted a full Messages
+    endpoint, this function trims it back to the base URL.
+    """
+
+    cleaned = url.rstrip("/")
+    if cleaned.endswith("/v1/messages"):
+        return cleaned.removesuffix("/v1/messages")
+    return cleaned
+
+
+def validate_anthropic_proxy_url(url: str, *, allow_openai_proxy: bool) -> None:
+    """Detect the common mistake of using an OpenAI /v1 proxy with this script.
+
+    The course proxy described in the assignment follows OpenAI chat completions,
+    which is exactly what the AG2 script needs. Claude Agent SDK is different:
+    it runs Claude Code and expects an Anthropic-compatible Messages API proxy.
+    Without this check, the SDK may fail with an opaque message such as
+    "Claude Code returned an error result: success".
+    """
+
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    looks_like_openai_proxy = path.endswith("/v1") or path.endswith(
+        "/v1/chat/completions"
+    )
+    looks_like_anthropic_proxy = path.endswith("/api") or path.endswith("/v1/messages")
+
+    if (
+        looks_like_openai_proxy
+        and not looks_like_anthropic_proxy
+        and not allow_openai_proxy
+    ):
+        raise ProxyCompatibilityError(
+            "The proxy URL in the selected file looks like an OpenAI "
+            "chat-completions proxy because its path ends with /v1. Claude Agent "
+            "SDK cannot use that format directly; it expects an Anthropic "
+            "Messages API compatible base URL, for example an OpenRouter "
+            "Anthropic base such as https://openrouter.ai/api, or a course proxy "
+            "that translates Anthropic /v1/messages requests. Use the AG2 script "
+            "with the /v1 proxy, or pass this script a different proxy file. To "
+            "try the URL anyway, add --allow-openai-proxy-url."
+        )
 
 
 def resolve_repo_root(repo: Path) -> Path:
@@ -248,6 +337,7 @@ def mcp_text_response(payload: dict[str, Any]) -> dict[str, Any]:
 async def list_repo_files_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: list repository files."""
 
+    log_step(f"tool list_repo_files(path={args.get('path', '.')!r})")
     start = resolve_inside_repo(args.get("path", "."))
     if not start.is_dir():
         raise NotADirectoryError(f"Not a directory: {start}")
@@ -266,6 +356,7 @@ async def list_repo_files_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def read_file_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: read a bounded preview from one file."""
 
+    log_step(f"tool read_file(path={args['path']!r})")
     file_path = resolve_inside_repo(args["path"])
     if not file_path.is_file():
         raise FileNotFoundError(f"Not a file: {file_path}")
@@ -280,6 +371,7 @@ async def read_file_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def count_test_files_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: count tests and return representative examples."""
 
+    log_step(f"tool count_test_files(path={args.get('path', '.')!r})")
     start = resolve_inside_repo(args.get("path", "."))
     test_files: list[str] = []
     for file_name in walk_repo_files(start, limit=2_000):
@@ -316,6 +408,7 @@ async def count_test_files_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def detect_ci_files_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: detect local CI configuration."""
 
+    log_step(f"tool detect_ci_files(path={args.get('path', '.')!r})")
     _ = resolve_inside_repo(args.get("path", "."))
     matches = find_existing_files(CI_FILE_CANDIDATES)
     return mcp_text_response(
@@ -334,6 +427,7 @@ async def detect_ci_files_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def detect_license_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: detect license information."""
 
+    log_step(f"tool detect_license(path={args.get('path', '.')!r})")
     _ = resolve_inside_repo(args.get("path", "."))
     license_files: list[dict[str, Any]] = []
     for candidate in repo_root().iterdir():
@@ -370,6 +464,10 @@ async def detect_license_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def recent_commits_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: inspect local git history without network access."""
 
+    log_step(
+        f"tool recent_commits(path={args.get('path', '.')!r}, "
+        f"limit={args.get('limit', 5)})"
+    )
     _ = resolve_inside_repo(args.get("path", "."))
     safe_limit = max(1, min(int(args.get("limit", 5)), 20))
     command = [
@@ -407,6 +505,7 @@ async def recent_commits_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def summarize_dependency_files_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: summarize dependency declaration files."""
 
+    log_step(f"tool summarize_dependency_files(path={args.get('path', '.')!r})")
     _ = resolve_inside_repo(args.get("path", "."))
     matches = find_existing_files(DEPENDENCY_FILE_CANDIDATES)
     summaries: list[dict[str, Any]] = []
@@ -439,6 +538,7 @@ async def summarize_dependency_files_tool(args: dict[str, Any]) -> dict[str, Any
 async def detect_risky_scripts_tool(args: dict[str, Any]) -> dict[str, Any]:
     """MCP tool: look for simple risk patterns in local scripts."""
 
+    log_step(f"tool detect_risky_scripts(path={args.get('path', '.')!r})")
     start = resolve_inside_repo(args.get("path", "."))
     risky_patterns = [
         "curl ",
@@ -588,12 +688,25 @@ Markdown report with:
 """.strip()
 
 
-def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> ClaudeAgentOptions:
+def build_options(
+    args: argparse.Namespace,
+    repo: Path,
+    proxy_url: str,
+    stderr_lines: list[str],
+) -> ClaudeAgentOptions:
     """Configure Claude Agent SDK with subagents and MCP tools."""
 
     auth_token = None
     if args.auth_token_file:
+        log_step("Reading optional OpenRouter auth token from file")
         auth_token = load_first_value(Path(args.auth_token_file), required=False)
+
+    def capture_stderr(line: str) -> None:
+        """Keep Claude Code stderr available for clearer error messages."""
+
+        stderr_lines.append(line)
+        if args.verbose and not args.quiet:
+            print(f"[claude stderr] {line}")
 
     # Claude Agent SDK uses Anthropic-protocol routing. OpenRouter's Anthropic
     # skin uses https://openrouter.ai/api. If your course proxy only implements
@@ -611,6 +724,7 @@ def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> Claud
         env["ANTHROPIC_AUTH_TOKEN"] = auth_token
         env["ANTHROPIC_API_KEY"] = ""
 
+    log_step("Preparing in-process MCP tools for repository inspection")
     mcp_tools = [
         list_repo_files_tool,
         read_file_tool,
@@ -626,6 +740,7 @@ def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> Claud
         version="1.0.0",
         tools=mcp_tools,
     )
+    log_step("Created repo_health MCP server")
 
     mcp_tool_names = [
         "mcp__repo_health__list_repo_files",
@@ -638,6 +753,7 @@ def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> Claud
         "mcp__repo_health__detect_risky_scripts",
     ]
 
+    log_step("Creating Claude Agent SDK supervisor options and subagents")
     return ClaudeAgentOptions(
         cwd=repo,
         env=env,
@@ -647,6 +763,7 @@ def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> Claud
         mcp_servers={"repo_health": mcp_server},
         allowed_tools=["Agent", *mcp_tool_names],
         agents=build_subagents(mcp_tool_names),
+        stderr=capture_stderr,
         system_prompt=(
             "You are a careful Supervisor Agent. Delegate repository health "
             "analysis to specialist subagents, then integrate their final "
@@ -658,31 +775,60 @@ def build_options(args: argparse.Namespace, repo: Path, proxy_url: str) -> Claud
 async def run_analysis(args: argparse.Namespace) -> str:
     """Run the Claude Agent SDK analysis and return the final result text."""
 
-    global ACTIVE_REPO_ROOT
+    global ACTIVE_REPO_ROOT, PROCESS_LOGS_ENABLED
 
+    PROCESS_LOGS_ENABLED = not args.quiet
+    log_step("Starting Claude Agent SDK repository health analysis")
     repo = resolve_repo_root(Path(args.repo))
     ACTIVE_REPO_ROOT = repo
-    proxy_url = load_first_value(Path(args.proxy_file), required=True)
-    options = build_options(args, repo, proxy_url)
+    log_step(f"Analyzing repository: {repo}")
+    log_step("Reading Anthropic-compatible proxy URL from file")
+    proxy_url = normalize_anthropic_base_url(
+        str(load_first_value(Path(args.proxy_file), required=True))
+    )
+    log_step("Validating proxy URL shape for Claude Agent SDK")
+    validate_anthropic_proxy_url(
+        proxy_url,
+        allow_openai_proxy=args.allow_openai_proxy_url,
+    )
+    log_step(f"Using model: {args.model}")
+    stderr_lines: list[str] = []
+    options = build_options(args, repo, proxy_url, stderr_lines)
     prompt = build_prompt(repo, args.question)
 
     final_results: list[str] = []
-    async for message in query(prompt=prompt, options=options):
-        # The SDK emits many message types. The final ResultMessage has a
-        # "result" attribute, which contains the user-facing final answer.
-        if hasattr(message, "result"):
-            final_results.append(str(message.result))
+    try:
+        log_step("Starting Supervisor Agent runtime")
+        async for message in query(prompt=prompt, options=options):
+            # The SDK emits many message types. The final ResultMessage has a
+            # "result" attribute, which contains the user-facing final answer.
+            if hasattr(message, "result"):
+                final_results.append(str(message.result))
+                log_step("Supervisor Agent returned a final result")
 
-        # Optional progress logging helps demonstrate subagent/tool activity
-        # during classroom demos without cluttering the default output.
-        if args.verbose and hasattr(message, "content") and message.content:
-            for block in message.content:
-                if getattr(block, "type", None) == "tool_use":
-                    print(f"[tool] {getattr(block, 'name', 'unknown')}")
+            # Optional progress logging helps demonstrate subagent/tool activity
+            # during classroom demos without cluttering the default output.
+            if hasattr(message, "content") and message.content:
+                for block in message.content:
+                    if getattr(block, "type", None) == "tool_use":
+                        log_step(f"SDK tool call: {getattr(block, 'name', 'unknown')}")
+    except Exception as exc:
+        stderr_tail = "\n".join(stderr_lines[-20:]).strip()
+        detail = f"\n\nRecent Claude Code stderr:\n{stderr_tail}" if stderr_tail else ""
+        raise AgentRunError(
+            "Claude Agent SDK failed while running the Claude Code subprocess. "
+            "If your proxy file contains the course OpenAI /v1 chat-completions "
+            "URL, use scripts/repo_health_ag2.py with that URL or provide an "
+            "Anthropic-compatible proxy URL for this script."
+            f"\n\nOriginal SDK error: {exc}{detail}"
+        ) from exc
 
     if not final_results:
         return "No final result was returned by Claude Agent SDK."
-    return final_results[-1]
+    report = final_results[-1]
+    save_report(report, repo)
+    log_step("Claude Agent SDK repository health analysis finished")
+    return report
 
 
 def parse_args() -> argparse.Namespace:
@@ -733,6 +879,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print tool/subagent progress while the SDK runs.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Hide process logs and only print the final report.",
+    )
+    parser.add_argument(
+        "--allow-openai-proxy-url",
+        action="store_true",
+        help=(
+            "Try to run even if the proxy URL looks like an OpenAI /v1 "
+            "chat-completions endpoint. Use only if your proxy translates "
+            "Anthropic Messages API requests."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -740,7 +900,12 @@ def main() -> None:
     """Script entry point."""
 
     args = parse_args()
-    report = asyncio.run(run_analysis(args))
+    try:
+        report = asyncio.run(run_analysis(args))
+    except ProxyCompatibilityError as exc:
+        raise SystemExit(f"Proxy configuration error:\n{exc}") from None
+    except AgentRunError as exc:
+        raise SystemExit(str(exc)) from None
     print("\n# Repository Health Report\n")
     print(report)
 

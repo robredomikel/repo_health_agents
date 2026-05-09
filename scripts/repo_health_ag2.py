@@ -84,6 +84,37 @@ DEPENDENCY_FILE_CANDIDATES = [
 ]
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def log_step(message: str, *, quiet: bool = False) -> None:
+    """Print a short process log line so the terminal shows current progress."""
+
+    if not quiet:
+        print(f"[repo-health] {message}", flush=True)
+
+
+def safe_report_filename(repo_root: Path) -> str:
+    """Build a safe Markdown filename from the analyzed repository name."""
+
+    safe_name = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in repo_root.name.strip()
+    ).strip("_")
+    if not safe_name:
+        safe_name = "repository"
+    return f"{safe_name}_ag2_repository_health_report.md"
+
+
+def save_report(report: str, repo_root: Path, *, quiet: bool = False) -> Path:
+    """Save the final report in the root folder of this project."""
+
+    output_path = PROJECT_ROOT / safe_report_filename(repo_root)
+    output_path.write_text(f"# Repository Health Report\n\n{report}\n", encoding="utf-8")
+    log_step(f"Saved report to {output_path}", quiet=quiet)
+    return output_path
+
+
 def load_proxy_url(proxy_file: Path) -> str:
     """Read the OpenRouter/course proxy URL from a small text file.
 
@@ -263,6 +294,7 @@ def register_repo_tools(
     repo_root: Path,
     tool_executor: UserProxyAgent,
     llm_tool_agents: list[AssistantAgent],
+    quiet: bool = False,
 ) -> None:
     """Register local repository inspection tools for AG2 agents.
 
@@ -278,6 +310,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """List repository files while skipping generated or dependency folders."""
 
+        log_step(f"tool list_repo_files(path={path!r})", quiet=quiet)
         start = resolve(path)
         if not start.is_dir():
             raise NotADirectoryError(f"Not a directory: {start}")
@@ -294,6 +327,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Read a bounded text preview of a repository file."""
 
+        log_step(f"tool read_file(path={path!r})", quiet=quiet)
         file_path = resolve(path)
         if not file_path.is_file():
             raise FileNotFoundError(f"Not a file: {file_path}")
@@ -306,6 +340,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Count common test files and report representative examples."""
 
+        log_step(f"tool count_test_files(path={path!r})", quiet=quiet)
         start = resolve(path)
         test_files: list[str] = []
         for file_name in walk_repo_files(repo_root, start, limit=2_000):
@@ -336,6 +371,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Detect common continuous integration configuration files."""
 
+        log_step(f"tool detect_ci_files(path={path!r})", quiet=quiet)
         _ = resolve(path)  # Validates that the requested path stays in repo_root.
         matches = find_existing_files(repo_root, CI_FILE_CANDIDATES)
         return {
@@ -348,6 +384,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Detect the repository license file and make a conservative guess."""
 
+        log_step(f"tool detect_license(path={path!r})", quiet=quiet)
         _ = resolve(path)
         license_files = []
         for candidate in repo_root.iterdir():
@@ -379,6 +416,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Read recent local git commits if the target directory is a git repo."""
 
+        log_step(f"tool recent_commits(path={path!r}, limit={limit})", quiet=quiet)
         _ = resolve(path)
         safe_limit = max(1, min(limit, 20))
         command = [
@@ -413,6 +451,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Find dependency files and estimate dependency complexity."""
 
+        log_step(f"tool summarize_dependency_files(path={path!r})", quiet=quiet)
         _ = resolve(path)
         matches = find_existing_files(repo_root, DEPENDENCY_FILE_CANDIDATES)
         summaries: list[dict[str, Any]] = []
@@ -441,6 +480,7 @@ def register_repo_tools(
     ) -> dict[str, Any]:
         """Look for simple high-risk shell/script patterns in repository files."""
 
+        log_step(f"tool detect_risky_scripts(path={path!r})", quiet=quiet)
         start = resolve(path)
         risky_patterns = [
             "curl ",
@@ -550,9 +590,12 @@ def run_specialist_chat(
     message: str,
     max_turns: int,
     silent: bool,
+    stage_name: str,
+    quiet: bool,
 ) -> str:
     """Run one routed specialist conversation and return its summary."""
 
+    log_step(f"Starting {stage_name}", quiet=quiet)
     result = tool_executor.initiate_chat(
         recipient=recipient,
         message=message,
@@ -561,7 +604,9 @@ def run_specialist_chat(
         clear_history=True,
         silent=silent,
     )
-    return clean_summary(str(result.summary))
+    summary = clean_summary(str(result.summary))
+    log_step(f"Completed {stage_name}", quiet=quiet)
+    return summary
 
 
 def build_agents(llm_config: dict[str, Any]) -> dict[str, Any]:
@@ -649,8 +694,13 @@ def build_agents(llm_config: dict[str, Any]) -> dict[str, Any]:
 def run_repository_health_analysis(args: argparse.Namespace) -> str:
     """Run the complete supervisor/router workflow."""
 
+    log_step("Starting AG2 repository health analysis", quiet=args.quiet)
     repo_root = resolve_repo_root(Path(args.repo))
+    log_step(f"Analyzing repository: {repo_root}", quiet=args.quiet)
+    log_step("Reading OpenRouter proxy URL from file", quiet=args.quiet)
     proxy_url = load_proxy_url(Path(args.proxy_file))
+    log_step(f"Using model: {args.model}", quiet=args.quiet)
+    log_step("Creating AG2 supervisor and specialist agents", quiet=args.quiet)
     llm_config = build_llm_config(proxy_url, args.model, args.temperature)
     agents = build_agents(llm_config)
 
@@ -660,9 +710,11 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         repo_root=repo_root,
         tool_executor=agents["tool_executor"],
         llm_tool_agents=[agents["inspector"], agents["quality"]],
+        quiet=args.quiet,
     )
+    log_step("Registered local repository inspection tools", quiet=args.quiet)
 
-    silent = not args.verbose
+    silent = args.quiet or not args.verbose
 
     inspection = run_specialist_chat(
         agents["tool_executor"],
@@ -677,6 +729,8 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         ),
         max_turns=args.max_turns,
         silent=silent,
+        stage_name="Repository Inspector Agent",
+        quiet=args.quiet,
     )
 
     quality = run_specialist_chat(
@@ -691,6 +745,8 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         ),
         max_turns=args.max_turns,
         silent=silent,
+        stage_name="Code Quality Agent",
+        quiet=args.quiet,
     )
 
     risk = run_specialist_chat(
@@ -705,6 +761,8 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         ),
         max_turns=3,
         silent=silent,
+        stage_name="Risk Assessment Agent",
+        quiet=args.quiet,
     )
 
     recommendation = run_specialist_chat(
@@ -718,6 +776,8 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         ),
         max_turns=3,
         silent=silent,
+        stage_name="Recommendation Agent",
+        quiet=args.quiet,
     )
 
     final_report = run_specialist_chat(
@@ -739,8 +799,12 @@ def run_repository_health_analysis(args: argparse.Namespace) -> str:
         ),
         max_turns=3,
         silent=silent,
+        stage_name="Supervisor Agent final integration",
+        quiet=args.quiet,
     )
 
+    save_report(final_report, repo_root, quiet=args.quiet)
+    log_step("AG2 repository health analysis finished", quiet=args.quiet)
     return final_report
 
 
@@ -786,6 +850,11 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Show the intermediate AG2 conversations and tool calls.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Hide process logs and only print the final report.",
     )
     return parser.parse_args()
 
