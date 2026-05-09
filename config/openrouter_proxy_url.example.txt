@@ -1,0 +1,14 @@
+# Copy this file to:
+#   config/openrouter_proxy_url.txt
+#
+# Then paste the course AWS proxy or OpenRouter-compatible base URL below.
+# The scripts ignore blank lines and lines that start with "#".
+#
+# AG2 / OpenAI-chat-completions style usually looks like:
+#   https://your-course-proxy.example.com/v1
+#
+# Claude Agent SDK / Anthropic-protocol style usually looks like:
+#   https://openrouter.ai/api
+#
+# Do not commit the real proxy URL if your course treats it as private.
+https://paste_your_url_link_here.com

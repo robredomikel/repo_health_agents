@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Keep the real course/OpenRouter proxy URL out of git.
+config/openrouter_proxy_url.txt
