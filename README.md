@@ -7,12 +7,11 @@ Similarly, this project has been assisted by OpenAI's coding copilot "Codex", wi
 
 ------------
 
-This project contains two implementations of the same multi-agent system:
+This project contains one implementation of the same multi-agent system:
 
 - `scripts/repo_health_ag2.py`: AG2 supervisor/router implementation.
-- `scripts/repo_health_anthropic_agentsdk.py`: Claude Agent SDK supervisor with subagents and local MCP tools.
 
-Both scripts analyze a local repository and produce a recommendation: `safe to use`, `use with caution`, `avoid`, or `missing information`.
+The script analyzes a local repository and produces a recommendation: `safe to use`, `use with caution`, `avoid`, or `missing information`.
 
 ## Setup
 
@@ -37,28 +36,6 @@ The terminal prints process logs for setup, each agent stage, local tool calls, 
 
 ```text
 <repository-name>_ag2_repository_health_report.md
-```
-
-## Run Claude Agent SDK Version
-
-```bash
-python scripts/repo_health_anthropic_agentsdk.py --repo /path/to/repository
-```
-
-The Claude Agent SDK version expects an Anthropic-protocol compatible proxy URL. OpenRouter's Anthropic-compatible base URL is usually `https://openrouter.ai/api`; the course AWS proxy must support that protocol for this script to run directly.
-
-The terminal prints process logs for setup, SDK tool calls, MCP tool calls, and report saving. The final report is also written to the project root as:
-
-```text
-<repository-name>_anthropic_agentsdk_repository_health_report.md
-```
-
-If `config/openrouter_proxy_url.txt` contains the course OpenAI `/v1` chat-completions URL, use the AG2 script with that file. For the Claude Agent SDK script, put an Anthropic-compatible URL in a separate ignored file and pass it explicitly:
-
-```bash
-python scripts/repo_health_anthropic_agentsdk.py \
-  --repo /path/to/repository \
-  --proxy-file config/anthropic_proxy_url.txt
 ```
 
 ## Design
@@ -105,18 +82,3 @@ In `scripts/repo_health_ag2.py`, Python acts as the explicit supervisor/router:
 7. The Recommendation Agent turns the risk assessment into concrete next steps.
 8. The Supervisor integrates all specialist outputs into the final Markdown report.
 
-### Claude Agent SDK Workflow
-
-In `scripts/repo_health_anthropic_agentsdk.py`, Claude Agent SDK is the supervisor runtime:
-
-1. The script reads an Anthropic-compatible proxy URL from a file.
-2. It exposes the same repository functions as in-process MCP tools using the SDK `@tool` decorator.
-3. It creates specialist subagents with `AgentDefinition`: `repository-inspector`, `code-quality`, `risk-assessment`, and `recommendation`.
-4. The main Claude Agent SDK session acts as the Supervisor Agent.
-5. The Supervisor uses the SDK `Agent` tool to call the Repository Inspector subagent first. That subagent calls MCP tools to gather local repository evidence.
-6. The Supervisor calls the Code Quality subagent next. That subagent also uses MCP tools, especially dependency and risky-script checks.
-7. The Supervisor sends the collected findings to the Risk Assessment subagent, which chooses the final risk label.
-8. The Supervisor sends the risk assessment to the Recommendation subagent, which proposes practical next actions.
-9. The Supervisor produces the final Markdown repository health report.
-
-The important difference is protocol compatibility: AG2 talks directly to the OpenAI-compatible `/v1` proxy, while Claude Agent SDK runs Claude Code and expects an Anthropic Messages API proxy.

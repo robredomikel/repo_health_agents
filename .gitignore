@@ -3,5 +3,4 @@ __pycache__/
 
 # Keep the real course/OpenRouter proxy URL out of git.
 config/openrouter_proxy_url.txt
-config/anthropic_proxy_url.txt
 config/openrouter_auth_token.txt
